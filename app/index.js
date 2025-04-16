@@ -5,16 +5,11 @@ import storage from "../globals/storage"
 import { urlDevice, urlLocation } from '../globals/URLs'
 import * as Location from 'expo-location'
 import * as TaskManager from 'expo-task-manager'
+import DebugControlPanel from '../components/DebugControlPanel'
 
-/**
- * Todos:
- *  - Clean up code, variable declarations, using useReducer
- *  - possibly add obscure passkey and device id from always being visible 
- *  - maybe break this into two or more other components
- */
 
-const LOCATION_UPDATE = 'location update'
-const stage = 'dev'
+const LOCATION_UPDATE = 'location-update'
+const STAGE = 'dev'
 
 // Defines the background task for periodically sending updates to the server. 
 TaskManager.defineTask(LOCATION_UPDATE, async ({ data, error }) => {
@@ -22,8 +17,8 @@ TaskManager.defineTask(LOCATION_UPDATE, async ({ data, error }) => {
 
   const { id, passkey } = await storage.load({ key: "device" })
 
-  location = data.locations.pop()
-  reqBody = {
+  const location = data.locations.pop()
+  const reqBody = {
     deviceID: id,
     passkey: passkey,
     longitude: location.coords.longitude,
@@ -47,43 +42,42 @@ TaskManager.defineTask(LOCATION_UPDATE, async ({ data, error }) => {
   })
 })
 
+/**
+ * Main application component
+ */
 export default function App() {
+  // Loading state during initial data fetch
   const [isLoading, setIsLoading] = useState(true)
 
-  // represents if the device is currently tracking location
-  const [tracking, setTracking] = useState()
-
-  // time since tracking started in ms since unix epoch
-  const startTime = useRef()
-
-  // time since tracking started in seconds
-  const [timeSinceStart, setTimeSinceStart] = useState(0)
-
-  // time since last location ping in seconds
-  const [timeSinceLastPing, setTimeSinceLastPing] = useState()
-
-  /**
-   * interval where every second it:
-   * 1. updates the value timeSinceStart
-   * 2. updates the value for timeSinceLastPing
-   * 3. updates location data by polling persistent storage
-   */
-  const [timerInterval, setTimerInterval] = useState()
-
-  // represents if the device has given location permissions
-  const [permissionsEnabled, setPermissionsEnabled] = useState(false)
-
-  // represents data for the most recent location ping
-  const [latitude, setLatitude] = useState()
-  const [longitude, setLongitude] = useState()
-  const timestamp = useRef()
-
-  // metadata about the device
+  // Device authentication data
   const [deviceID, setDeviceID] = useState()
   const [passkey, setPasskey] = useState()
 
+  // Current tracking status
+  const [isTracking, setIsTracking] = useState()
+  // Time since tracking start, in ms since epoch
+  const startTime = useRef()
+
+  // Location permission status
+  const [permissionsEnabled, setPermissionsEnabled] = useState(false)
+
+  // Location data
+  const [latitude, setLatitude] = useState()
+  const [longitude, setLongitude] = useState()
+  const timestamp = useRef() // ms since epoch
+
+  // Time since tracking start in seconds
+  const [timeSinceStart, setTimeSinceStart] = useState(0)
+  // Time since last location ping in seconds
+  const [timeSinceLastPing, setTimeSinceLastPing] = useState()
+
+  //Interval to update timeSinceStart, timeSinceLastPing, and poll RN storage 
+  //for location updates
+  const [timerInterval, setTimerInterval] = useState()
+
+
   /**
-   * Load any state saved to persistent storage
+   * Loads persisted state and sets intervals as needed
    */
   useEffect(() => {
     const loadDevice = storage.load({ key: "device" })
@@ -96,15 +90,14 @@ export default function App() {
     const loadTracking = storage.load({ key: "trackingStart" })
       .then(data => {
         startTime.current = data.trackingStart
-        setTracking(true)
+        setIsTracking(true)
         setPermissionsEnabled(true)
 
-        
         if (timerInterval == null) {
           const interval = setInterval(() => {
             setTimeSinceStart((Date.now() - startTime.current) / 1000)
             setTimeSinceLastPing((Date.now() - timestamp.current) / 1000)
-      
+
             storage.load({ key: "location" })
               .then(location => {
                 setLongitude(location.latestLong)
@@ -126,14 +119,17 @@ export default function App() {
       .catch(err => console.err(err))
 
     Promise.all([loadDevice, loadTracking, loadLocation]).finally(setIsLoading(false))
+
+    return () => { if (timerInterval) clearInterval(timerInterval) }
   }, [])
+
 
   /**
    * Changes app state, sets persistent storage, sets a timer, and starts the location 
    * background task.
    */
   const turnOnTracking = () => {
-    setTracking(true)
+    setIsTracking(true)
     const currentTime = Date.now()
     startTime.current = currentTime
 
@@ -148,7 +144,7 @@ export default function App() {
       const interval = setInterval(() => {
         setTimeSinceStart((Date.now() - startTime.current) / 1000)
         setTimeSinceLastPing((Date.now() - timestamp.current) / 1000)
-  
+
         storage.load({ key: "location" })
           .then(location => {
             setLongitude(location.latestLong)
@@ -168,12 +164,13 @@ export default function App() {
       }))
   }
 
+
   /**
    * Resets app state, removes location-related persistent data, and stopping location background
    * tasks.
    */
   const turnOffTracking = () => {
-    setTracking(false)
+    setIsTracking(false)
     startTime.current = NaN
     setTimeSinceStart(0)
     setTimeSinceLastPing()
@@ -194,6 +191,7 @@ export default function App() {
 
     Location.stopLocationUpdatesAsync(LOCATION_UPDATE)
   }
+
 
   /**
    * Sets up the device by asking for location permissions and registering device with the backend 
@@ -216,11 +214,11 @@ export default function App() {
 
     const characters = "abcdefghijklmnpqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".split("")
     let newPasskey = ""
-    for (i = 0; i < 6; i++) {
-      newPasskey += characters[Math.floor(Math.random() * 62)]
+    for (let i = 0; i < 6; i++) { // passkey length
+      newPasskey += characters[Math.floor(Math.random() * characters.length)]
     }
 
-    res = await fetch(urlDevice, {
+    const res = await fetch(urlDevice, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -231,8 +229,7 @@ export default function App() {
     })
 
     // save to component state and persistent storage
-    const json = await res.json()
-    newDeviceID = json.deviceID
+    const newDeviceID = (await res.json()).deviceID
 
     setDeviceID(newDeviceID)
     setPasskey(newPasskey)
@@ -245,42 +242,7 @@ export default function App() {
     })
   }
 
-  /**
-   * Debug function that queries the location of the device and outputs it to console
-   * 
-   * May take seconds to resolve, depending on when the device sends the data
-   */
-  const debugViewLocation = async () => {
-    console.log("DEBUG:")
-    const locObj = await Location.getCurrentPositionAsync()
-
-    console.log(` coords: ${Object.entries(locObj.coords)} | timestamp: ${locObj.timestamp}`)
-    const { latitude, longitude } = locObj.coords
-
-    setLatitude(latitude)
-    setLongitude(longitude)
-    timestamp.current = locObj.timestamp
-
-    // save data to RN storage
-    storage.save({
-      key: "location",
-      data: {
-        latestLat: latitude,
-        latestLong: longitude,
-        locationTimestamp: timestamp.current
-      }
-    })
-  }
-
-  /**
-   * Debug function to clear all data stored in react native storage
-   */
-  const clearPersistentStorage = () => {
-    storage.remove({ key: "device" })
-    storage.remove({ key: "trackingStart" })
-    storage.remove({ key: "location" })
-  }
-
+  
   if (isLoading) return (
     <View>
       <StatusBar style="light" translucent={false} />
@@ -296,24 +258,13 @@ export default function App() {
       <Text>DeviceID: {deviceID}</Text>
       <Text>Passkey: {passkey}</Text>
       <Text>Status: {permissionsEnabled == false ? "Location services disabled"
-        : tracking ? "Currently Tracking"
+        : isTracking ? "Currently Tracking"
           : "Currently Not Tracking"}
       </Text>
 
-      {stage == "dev" && <>
-        <Button
-          title="[DEBUG] clear persistent data"
-          color={'#495db6'}
-          onPress={clearPersistentStorage}
-
-        />
-        <Button
-          title='[DEBUG] query location'
-          color={'#495db6'}
-          onPress={debugViewLocation}
-          disabled={!tracking}
-        />
-      </>}
+      {STAGE == "dev" &&
+        <DebugControlPanel />
+      }
 
       {/* Request location permissions button */}
       {permissionsEnabled == false &&
@@ -326,7 +277,7 @@ export default function App() {
       }
 
       {/* Tracking statistics */}
-      {tracking ?
+      {isTracking ?
         <>
           <Text>Tracking since{" "}
             {Math.floor(timeSinceStart / 86400) > 0 ? Math.floor(timeSinceStart / 86400) + " days, " : ""}
