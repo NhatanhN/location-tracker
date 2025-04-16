@@ -2,82 +2,141 @@ import { StatusBar } from 'expo-status-bar'
 import { Button, StyleSheet, Text, View } from 'react-native'
 import { useEffect, useRef, useState } from 'react'
 import storage from "../globals/storage"
+import { urlDevice, urlLocation } from '../globals/URLs'
 import * as Location from 'expo-location'
 import * as TaskManager from 'expo-task-manager'
 
-// Name for background tasks
+/**
+ * Todos:
+ *  - Clean up code, variable declarations, using useReducer
+ *  - possibly add obscure passkey and device id from always being visible 
+ *  - maybe break this into two or more other components
+ */
+
 const LOCATION_UPDATE = 'location update'
+const stage = 'dev'
 
 // Defines the background task for periodically sending updates to the server. 
-// Meant to perform across intervals of 6 hours or so
-TaskManager.defineTask(LOCATION_UPDATE, ({ data, error }) => {
-  if (data) {
-    const { locations } = data;
-    // TODO:
-    // have this send location data to the backend periodically
-  }
-});
+TaskManager.defineTask(LOCATION_UPDATE, async ({ data, error }) => {
+  if (!data) return
 
-// Load persisted data
-let pTrackingStart, pLat, pLong, pTimestamp
-storage.getBatchData([
-  { key: "trackingStart" },
-  { key: "location" }
-]).then(res => {
-  pTrackingStart = res[0]["trackingStart"]
-  pLat = res[1]["latestLat"]
-  pLong = res[1]["latestLong"]
-  pTimestamp = res[1]["locationTimestamp"]
-}).catch(err => {
-  if (err.name == 'NotFoundError') return
-  console.error(`Error in loading persisted tracking data :: ${err}`)
+  const { id, passkey } = await storage.load({ key: "device" })
+
+  location = data.locations.pop()
+  reqBody = {
+    deviceID: id,
+    passkey: passkey,
+    longitude: location.coords.longitude,
+    latitude: location.coords.latitude,
+    timestamp: location.timestamp
+  }
+
+  fetch(urlLocation, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(reqBody)
+  })
+
+  storage.save({
+    key: "location",
+    data: {
+      latestLat: reqBody.latitude,
+      latestLong: reqBody.longitude,
+      latestTimestamp: reqBody.timestamp
+    }
+  })
 })
 
-// TODO:
-// have the app generate its own device ID and obtain its passkey 
-// from the backend
 export default function App() {
+  const [isLoading, setIsLoading] = useState(true)
+
   // represents if the device is currently tracking location
-  const [tracking, setTracking] = useState(pTrackingStart != null)
+  const [tracking, setTracking] = useState()
 
-  // represents the time when tracking had been turned on in ms since unix epoch
-  const startTime = useRef(pTrackingStart ?? NaN)
+  // time since tracking started in ms since unix epoch
+  const startTime = useRef()
 
-  // represents the time since tracking had been turned on in seconds
+  // time since tracking started in seconds
   const [timeSinceStart, setTimeSinceStart] = useState(0)
 
-  // represents time since last location ping in seconds
+  // time since last location ping in seconds
   const [timeSinceLastPing, setTimeSinceLastPing] = useState()
 
-  // pointer to the interval that updates timeSinceStart and timeSinceLastPing periodically
-  const [timerInverval, setTimerInverval] = useState()
+  /**
+   * interval where every second it:
+   * 1. updates the value timeSinceStart
+   * 2. updates the value for timeSinceLastPing
+   * 3. updates location data by polling persistent storage
+   */
+  const [timerInterval, setTimerInterval] = useState()
 
   // represents if the device has given location permissions
-  const [permissionsEnabled, setPermissionsEnabled] = useState(pTrackingStart != null)
+  const [permissionsEnabled, setPermissionsEnabled] = useState(false)
 
   // represents data for the most recent location ping
-  const [latitude, setLatitude] = useState(pLat)
-  const [longitude, setLongitude] = useState(pLong)
-  const timestamp = useRef(pTimestamp ?? NaN)
+  const [latitude, setLatitude] = useState()
+  const [longitude, setLongitude] = useState()
+  const timestamp = useRef()
 
+  // metadata about the device
+  const [deviceID, setDeviceID] = useState()
+  const [passkey, setPasskey] = useState()
+
+  /**
+   * Load any state saved to persistent storage
+   */
   useEffect(() => {
-    // If the application had been tracking location data since before app open,
-    // the intervals to update timeSinceStart and timeSinceLastPing should be rerun
-    if (pTrackingStart != null) {
-      const interval = setInterval(() => {
-        setTimeSinceStart((Date.now() - startTime.current) / 1000)
-        setTimeSinceLastPing((Date.now() - timestamp.current) / 1000)
-      }, 1000)
-      setTimerInverval(interval)
-    }
+    const loadDevice = storage.load({ key: "device" })
+      .then(device => {
+        setDeviceID(device.id)
+        setPasskey(device.passkey)
+      })
+      .catch(err => console.err(err))
+
+    const loadTracking = storage.load({ key: "trackingStart" })
+      .then(data => {
+        startTime.current = data.trackingStart
+        setTracking(true)
+        setPermissionsEnabled(true)
+
+        
+        if (timerInterval == null) {
+          const interval = setInterval(() => {
+            setTimeSinceStart((Date.now() - startTime.current) / 1000)
+            setTimeSinceLastPing((Date.now() - timestamp.current) / 1000)
+      
+            storage.load({ key: "location" })
+              .then(location => {
+                setLongitude(location.latestLong)
+                setLatitude(location.latestLat)
+                timestamp.current = location.latestTimestamp
+              }).catch(err => console.error(`useEffect interval ${err}`))
+          }, 1000)
+          setTimerInterval(interval)
+        }
+      })
+      .catch(err => console.err(err))
+
+    const loadLocation = storage.load({ key: "location" })
+      .then(location => {
+        setLongitude(location.latestLong)
+        setLatitude(location.latestLat)
+        timestamp.current = location.latestTimestamp
+      })
+      .catch(err => console.err(err))
+
+    Promise.all([loadDevice, loadTracking, loadLocation]).finally(setIsLoading(false))
   }, [])
 
+  /**
+   * Changes app state, sets persistent storage, sets a timer, and starts the location 
+   * background task.
+   */
   const turnOnTracking = () => {
     setTracking(true)
     const currentTime = Date.now()
     startTime.current = currentTime
 
-    // save data to RN storage
     storage.save({
       key: "trackingStart",
       data: {
@@ -85,32 +144,46 @@ export default function App() {
       }
     })
 
-    // set an interval to update timeSinceStart, timeSinceLastPing every so often
-    const interval = setInterval(() => {
-      setTimeSinceStart((Date.now() - startTime.current) / 1000)
-      setTimeSinceLastPing((Date.now() - timestamp.current) / 1000)
-    }, 100)
-    setTimerInverval(interval)
+    if (timerInterval == null) {
+      const interval = setInterval(() => {
+        setTimeSinceStart((Date.now() - startTime.current) / 1000)
+        setTimeSinceLastPing((Date.now() - timestamp.current) / 1000)
+  
+        storage.load({ key: "location" })
+          .then(location => {
+            setLongitude(location.latestLong)
+            setLatitude(location.latestLat)
+            timestamp.current = location.latestTimestamp
+          }).catch(err => console.error(`turnOn interval${err}`))
+      }, 1000)
+      setTimerInterval(interval)
+    }
 
-    /*
-    // enable the background task to send location updates periodically
-    Location.startLocationUpdatesAsync(LOCATION_UPDATE, {
-      accuracy: Location.Accuracy.High,
-      timeInterval: 1000 * 60 * 60 * 6, // 6 hours (only applies on android),
-      pausesUpdatesAutomatically: true // variable time between updates (only applies to iOS)
-    })
-     */
+    // ensure the background task isn't already running
+    Location.stopLocationUpdatesAsync(LOCATION_UPDATE)
+      .finally(() => Location.startLocationUpdatesAsync(LOCATION_UPDATE, {
+        accuracy: Location.Accuracy.High,
+        timeInterval: 1000 * 60 * 60 * 6, // 6 hours (only applies on android),
+        pausesUpdatesAutomatically: true // variable time between updates (only applies to iOS)
+      }))
   }
 
+  /**
+   * Resets app state, removes location-related persistent data, and stopping location background
+   * tasks.
+   */
   const turnOffTracking = () => {
     setTracking(false)
     startTime.current = NaN
     setTimeSinceStart(0)
     setTimeSinceLastPing()
-    clearInterval(timerInverval)
+
     setLatitude()
     setLongitude()
     timestamp.current = NaN
+
+    clearInterval(timerInterval)
+    setTimerInterval()
 
     storage.remove({
       key: "trackingStart"
@@ -118,9 +191,16 @@ export default function App() {
     storage.remove({
       key: "location"
     })
+
+    Location.stopLocationUpdatesAsync(LOCATION_UPDATE)
   }
 
-  const requestLocationPermissions = async () => {
+  /**
+   * Sets up the device by asking for location permissions and registering device with the backend 
+   * server.
+   */
+  const setUp = async () => {
+    // Request location permissions
     const { status: foregroundStatus } = await Location.requestForegroundPermissionsAsync();
     if (foregroundStatus === 'granted') {
       const { status: backgroundStatus } = await Location.requestBackgroundPermissionsAsync();
@@ -128,6 +208,41 @@ export default function App() {
         setPermissionsEnabled(true)
       }
     }
+
+    // Obtain a new device ID
+    if (deviceID && passkey) return
+
+    setDeviceID("Fetching new deviceID...")
+
+    const characters = "abcdefghijklmnpqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".split("")
+    let newPasskey = ""
+    for (i = 0; i < 6; i++) {
+      newPasskey += characters[Math.floor(Math.random() * 62)]
+    }
+
+    res = await fetch(urlDevice, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        passkey: newPasskey
+      })
+    })
+
+    // save to component state and persistent storage
+    const json = await res.json()
+    newDeviceID = json.deviceID
+
+    setDeviceID(newDeviceID)
+    setPasskey(newPasskey)
+    storage.save({
+      key: "device",
+      data: {
+        id: newDeviceID,
+        passkey: newPasskey
+      }
+    })
   }
 
   /**
@@ -157,24 +272,57 @@ export default function App() {
     })
   }
 
+  /**
+   * Debug function to clear all data stored in react native storage
+   */
+  const clearPersistentStorage = () => {
+    storage.remove({ key: "device" })
+    storage.remove({ key: "trackingStart" })
+    storage.remove({ key: "location" })
+  }
+
+  if (isLoading) return (
+    <View>
+      <StatusBar style="light" translucent={false} />
+      <Text>App is loading...</Text>
+    </View>
+  )
+
   return (
     <View style={styles.container}>
+      <StatusBar style="light" translucent={false} />
+
       {/* Device statistics */}
-      <StatusBar style="auto" />
-      <Text>DeviceID: </Text>
-      <Text>Passkey: </Text>
+      <Text>DeviceID: {deviceID}</Text>
+      <Text>Passkey: {passkey}</Text>
       <Text>Status: {permissionsEnabled == false ? "Location services disabled"
         : tracking ? "Currently Tracking"
           : "Currently Not Tracking"}
       </Text>
+
+      {stage == "dev" && <>
+        <Button
+          title="[DEBUG] clear persistent data"
+          color={'#495db6'}
+          onPress={clearPersistentStorage}
+
+        />
+        <Button
+          title='[DEBUG] query location'
+          color={'#495db6'}
+          onPress={debugViewLocation}
+          disabled={!tracking}
+        />
+      </>}
 
       {/* Request location permissions button */}
       {permissionsEnabled == false &&
         <Button
           title="Enable location services"
           color={'#495db6'}
-          onPress={requestLocationPermissions}
+          onPress={setUp}
         />
+
       }
 
       {/* Tracking statistics */}
@@ -185,22 +333,18 @@ export default function App() {
             {Math.floor(timeSinceStart / 3600 % 24) > 0 ? Math.floor(timeSinceStart / 3600 % 24) + " hours, " : ""}
             {Math.floor(timeSinceStart / 60 % 60) > 0 ? Math.floor(timeSinceStart / 60 % 60) + " minutes, " : ""}
             {Math.floor(timeSinceStart % 60)} seconds ago</Text>
-          <Text>Location pinged{" "}
+          <Text>Time of last location ping:{" "}
             {Math.floor(timeSinceLastPing / 86400) > 0 ? Math.floor(timeSinceLastPing / 86400) + " days, " : ""}
             {Math.floor(timeSinceLastPing / 3600 % 24) > 0 ? Math.floor(timeSinceLastPing / 3600 % 24) + " hours, " : ""}
             {Math.floor(timeSinceLastPing / 60 % 60) > 0 ? Math.floor(timeSinceLastPing / 60 % 60) + " minutes, " : ""}
             {Math.floor(timeSinceLastPing % 60)} seconds ago</Text>
-          <Text>Last pinged location: {`lat: ${latitude == null ? "N/A" : latitude}, long: ${longitude == null ? "N/A" : longitude}`}</Text>
+          <Text>Location: {`lat: ${latitude == null ? "N/A" : latitude}, long: ${longitude == null ? "N/A" : longitude}`}</Text>
           <Button
             title='Turn Off'
             color={'#495db6'}
             onPress={turnOffTracking}
           />
-          <Button
-            title='[DEBUG] query location'
-            color={'#495db6'}
-            onPress={debugViewLocation}
-          />
+
         </>
         :
         <>
@@ -208,11 +352,10 @@ export default function App() {
             title='Turn On'
             color={'#495db6'}
             onPress={turnOnTracking}
-            disabled={permissionsEnabled == false}
+            disabled={permissionsEnabled == false || deviceID == "Fetching new deviceID..."}
           />
         </>
       }
-
     </View>
   );
 }
